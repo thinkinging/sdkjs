@@ -352,67 +352,113 @@
 	}
 
 	DependencyGraph.prototype = {
+		maxSharedRecursion: 100,
 		//listening
-		startListeningRange: function(sheetId, bbox, listener) {
-			//todo bbox clone or bbox immutable
-			var listenerId = listener.getListenerId();
+		getSheetListener: function(sheetId, opt_IgnoreAdd, opt_IgnoreRemove, opt_AddIfNotExist){
+			var i;
 			var sheetContainer = this.sheetListeners[sheetId];
-			if (!sheetContainer) {
-				sheetContainer = {cellMap: {}, areaMap: {}, areaTree: new RangeTree(), defName3d: {}};
-				this.sheetListeners[sheetId] = sheetContainer;
+			if(!sheetContainer){
+				if(!opt_AddIfNotExist){
+					return sheetContainer;
+				} else {
+					sheetContainer = {
+						cells: [], rangesTop: [], rangesBottom: [], defName3d: {},
+						dirtyCellsAdd: false, dirtyCellsRemove: [], dirtyRangesAdd: false, dirtyRangesRemoveTop: [],
+						dirtyRangesRemoveBottom: []
+					};
+					this.sheetListeners[sheetId] = sheetContainer;
+				}
 			}
+			if(!opt_IgnoreRemove || sheetContainer.dirtyCellsAdd || sheetContainer.dirtyRangesAdd){
+				if (sheetContainer.dirtyCellsRemove.length > 0) {
+					for (i = 0; i < sheetContainer.dirtyCellsRemove.length; ++i) {
+						sheetContainer.cells[sheetContainer.dirtyCellsRemove[i]] = null;
+					}
+					sheetContainer.cells = sheetContainer.cells.filter(function(el) {
+						return el != null;
+					});
+					sheetContainer.dirtyCellsRemove = [];
+				}
+				if (sheetContainer.dirtyRangesRemoveTop.length > 0) {
+					for (i = 0; i < sheetContainer.dirtyRangesRemoveTop.length; ++i) {
+						sheetContainer.rangesTop[sheetContainer.dirtyRangesRemoveTop[i]] = null;
+					}
+					for (i = 0; i < sheetContainer.dirtyRangesRemoveBottom.length; ++i) {
+						sheetContainer.rangesBottom[sheetContainer.dirtyRangesRemoveBottom[i]] = null;
+					}
+					sheetContainer.rangesTop = sheetContainer.rangesTop.filter(function(el) {
+						return el != null;
+					});
+					sheetContainer.rangesBottom = sheetContainer.rangesBottom.filter(function(el) {
+						return el != null;
+					});
+					sheetContainer.dirtyRangesRemoveTop = [];
+					sheetContainer.dirtyRangesRemoveBottom = [];
+				}
+			}
+			if(!opt_IgnoreAdd) {
+				if (sheetContainer.dirtyCellsAdd) {
+					sheetContainer.cells.sort(function(a, b) {
+						return a.cellIndex - b.cellIndex;
+					});
+					sheetContainer.dirtyCellsAdd = false;
+				}
+				if (sheetContainer.dirtyRangesAdd) {
+					sheetContainer.rangesTop.sort(function(a, b) {
+						return Asc.Range.prototype.compareByLeftTop(a.bbox, b.bbox);
+					});
+					sheetContainer.rangesBottom.sort(function(a, b) {
+						return Asc.Range.prototype.compareByRightBottom(a.bbox, b.bbox);
+					});
+					sheetContainer.dirtyRangesAdd = false;
+				}
+			}
+			return sheetContainer;
+		},
+		startListeningRange: function(sheetId, bbox, listener, isShared) {
+			isShared = true;
+			//todo clone inside or outside startListeningRange?
+			var data;
+			var sheetContainer = this.getSheetListener(sheetId, true, true, true);
 			if (bbox.isOneCell()) {
 				var cellIndex = getCellIndex(bbox.r1, bbox.c1);
-				var cellMapElem = sheetContainer.cellMap[cellIndex];
-				if (!cellMapElem) {
-					cellMapElem = {count: 0, listeners: {}};
-					sheetContainer.cellMap[cellIndex] = cellMapElem;
-				}
-				if (!cellMapElem.listeners[listenerId]) {
-					cellMapElem.listeners[listenerId] = listener;
-					cellMapElem.count++;
-				}
+				data = {cellIndex: cellIndex, listener: listener};
+				sheetContainer.dirtyCellsAdd = true;
+				sheetContainer.cells.push(data);
 			} else {
-				var vertexIndex = getVertexIndex(bbox);
-				var areaSheetElem = sheetContainer.areaMap[vertexIndex];
-				if (!areaSheetElem) {
-					areaSheetElem = {id: null, bbox: bbox, count: 0, listeners: {}};
-					sheetContainer.areaMap[vertexIndex] = areaSheetElem;
-					sheetContainer.areaTree.add(bbox, areaSheetElem);
+				data = {bbox: bbox.clone(), listener: listener, isActive: true};
+				if (isShared) {
+					data.sharedBroadcast = {changedBBox: null, prevChangedBBox: null, recursion: 0};
 				}
-				if (!areaSheetElem.listeners[listenerId]) {
-					areaSheetElem.listeners[listenerId] = listener;
-					areaSheetElem.count++;
-				}
+				sheetContainer.dirtyRangesAdd = true;
+				sheetContainer.rangesTop.push(data);
+				sheetContainer.rangesBottom.push(data);
 			}
 		},
 		endListeningRange: function(sheetId, bbox, listener) {
-			var listenerId = listener.getListenerId();
-			if (null != listenerId) {
-				var sheetContainer = this.sheetListeners[sheetId];
-				if (sheetContainer) {
-					if (bbox.isOneCell()) {
-						var cellIndex = getCellIndex(bbox.r1, bbox.c1);
-						var cellMapElem = sheetContainer.cellMap[cellIndex];
-						if (cellMapElem && cellMapElem.listeners[listenerId]) {
-							delete cellMapElem.listeners[listenerId];
-							cellMapElem.count--;
-							if (cellMapElem.count <= 0) {
-								delete sheetContainer.cellMap[cellIndex];
-							}
-						}
-					} else {
-						var vertexIndex = getVertexIndex(bbox);
-						var areaSheetElem = sheetContainer.areaMap[vertexIndex];
-						if (areaSheetElem && areaSheetElem.listeners[listenerId]) {
-							delete areaSheetElem.listeners[listenerId];
-							areaSheetElem.count--;
-							if (areaSheetElem.count <= 0) {
-								delete sheetContainer.areaMap[vertexIndex];
-								sheetContainer.areaTree.remove(bbox, areaSheetElem);
-							}
-						}
-					}
+			//todo data obj is overhead
+			var data = {bbox: bbox, listener: listener};
+			var sheetContainer = this.getSheetListener(sheetId, false, true);
+			var index;
+			if (sheetContainer) {
+				if (bbox.isOneCell()) {
+					index = AscCommon.lower_bound(sheetContainer.cells, getCellIndex(data.bbox.r1, data.bbox.c1), function(a, b){
+						getFromCellIndex(a);
+						var row = g_FCI.row;
+						var col = g_FCI.col;
+						getFromCellIndex(b);
+						return Asc.Range.prototype.compareCell(row, col, g_FCI.row, g_FCI.col);
+					});
+					this._removeFromListeningByLeftTopCell(index, sheetContainer.cells, bbox, listener);
+				} else {
+					index = AscCommon.lower_bound(sheetContainer.rangesTop, data, function(a, b) {
+						return Asc.Range.prototype.compareByLeftTop(a.bbox, b.bbox);
+					});
+					this._removeFromListeningByLeftTop(index, sheetContainer, bbox, listener);
+					index = AscCommon.lower_bound(sheetContainer.rangesBottom, data, function(a, b) {
+						return Asc.Range.prototype.compareByRightBottom(a.bbox, b.bbox);
+					});
+					this._removeFromListeningByRightBottom(index, sheetContainer, bbox, listener);
 				}
 			}
 		},
@@ -439,11 +485,7 @@
 				container.count++;
 			}
 			if(opt_sheetId){
-				var sheetContainer = this.sheetListeners[opt_sheetId];
-				if (!sheetContainer) {
-					sheetContainer = {cellMap: {}, areaMap: {}, areaTree: new RangeTree(), defName3d: {}};
-					this.sheetListeners[opt_sheetId] = sheetContainer;
-				}
+				var sheetContainer = this.getSheetListener(sheetId, true, true, true);
 				sheetContainer.defName3d[listenerId] = listener;
 			}
 		},
@@ -463,7 +505,7 @@
 					}
 				}
 				if(opt_sheetId){
-					var sheetContainer = this.sheetListeners[opt_sheetId];
+					var sheetContainer = this.getSheetListener(opt_sheetId, true, true);
 					if (sheetContainer) {
 						delete sheetContainer.defName3d[listenerId];
 					}
@@ -488,21 +530,18 @@
 		prepareChangeSheet: function(sheetId, data, tableNamesMap) {
 			this.buildDependency();
 			var listeners = {};
-			var sheetContainer = this.sheetListeners[sheetId];
+			var i, listenerId, listener;
+			var sheetContainer = this.getSheetListener(sheetId);
 			if (sheetContainer) {
-				for (var cellIndex in sheetContainer.cellMap) {
-					var cellMapElem = sheetContainer.cellMap[cellIndex];
-					for (var listenerId in cellMapElem.listeners) {
-						listeners[listenerId] = cellMapElem.listeners[listenerId];
-					}
+				for( i = 0; i < sheetContainer.cells.length; ++i){
+					listener = sheetContainer.cells[i].listener;
+					listeners[listener.getListenerId()] = listener;
 				}
-				for (var vertexIndex in sheetContainer.areaMap) {
-					var areaSheetElem = sheetContainer.areaMap[vertexIndex];
-					for (var listenerId in areaSheetElem.listeners) {
-						listeners[listenerId] = areaSheetElem.listeners[listenerId];
-					}
+				for( i = 0; i < sheetContainer.rangesTop.length; ++i){
+					listener = sheetContainer.rangesTop[i].listener;
+					listeners[listener.getListenerId()] = listener;
 				}
-				for (var listenerId in sheetContainer.defName3d) {
+				for (listenerId in sheetContainer.defName3d) {
 					listeners[listenerId] = sheetContainer.defName3d[listenerId];
 				}
 			}
@@ -511,7 +550,7 @@
 					var nameIndex = getDefNameIndex(tableName);
 					var container = this.defNameListeners[nameIndex];
 					if (container) {
-						for (var listenerId in container.listeners) {
+						for (listenerId in container.listeners) {
 							listeners[listenerId] = container.listeners[listenerId];
 						}
 					}
@@ -521,14 +560,14 @@
 				type: c_oNotifyType.Prepare, actionType: c_oNotifyType.ChangeSheet, data: data, transformed: {},
 				preparedData: {}
 			};
-			for (var listenerId in listeners) {
+			for (listenerId in listeners) {
 				listeners[listenerId].notify(notifyData);
 			}
-			for (var listenerId in notifyData.transformed) {
+			for (listenerId in notifyData.transformed) {
 				if (notifyData.transformed.hasOwnProperty(listenerId)) {
 					delete listeners[listenerId];
 					var elems = notifyData.transformed[listenerId];
-					for (var i = 0; i < elems.length; ++i) {
+					for (i = 0; i < elems.length; ++i) {
 						var elem = elems[i];
 						listeners[elem.getListenerId()] = elem;
 						elem.notify(notifyData);
@@ -873,10 +912,11 @@
 				}
 				var changedSheetRepeated = this.changedRangeRepeated[sheetId];
 				if (!changedSheetRepeated) {
-					changedSheetRepeated = {};
+					changedSheetRepeated = {rangesTop: [], rangesBottom: []};
 					this.changedRangeRepeated[sheetId] = changedSheetRepeated;
 				}
-				changedSheetRepeated[name] = bbox;
+				changedSheetRepeated.rangesTop.push(bbox);
+				changedSheetRepeated.rangesBottom.push(bbox);
 			}
 			changedSheet[name] = bbox;
 		},
@@ -901,12 +941,12 @@
 					}
 					var changedSheetRepeated = t.changedCellRepeated[sheetId];
 					if (!changedSheetRepeated) {
-						changedSheetRepeated = {};
+						changedSheetRepeated = [];
 						t.changedCellRepeated[sheetId] = changedSheetRepeated;
 					}
-					changedSheetRepeated[cellIndex] = 1;
+					changedSheetRepeated.push(cellIndex);
 				}
-				changedSheet[cellIndex] = 1;
+				changedSheet[cellIndex] = cellIndex;
 			};
 
 			addChangedSheet(cell.nRow, cell.nCol);
@@ -926,24 +966,21 @@
 		},
 		addToChangedRange: function(sheetId, bbox) {
 			var notifyData = {type: c_oNotifyType.Dirty};
-			var sheetContainer = this.sheetListeners[sheetId];
+			var sheetContainer = this.getSheetListener(sheetId);
+			var i, elem;
 			if (sheetContainer) {
-				for (var cellIndex in sheetContainer.cellMap) {
-					getFromCellIndex(cellIndex);
+				for(i = 0; i < sheetContainer.cells.length; ++i){
+					elem = sheetContainer.cells[i];
+					getFromCellIndex(elem.cellIndex);
 					if (bbox.contains(g_FCI.col, g_FCI.row)) {
-						var cellMapElem = sheetContainer.cellMap[cellIndex];
-						for (var listenerId in cellMapElem.listeners) {
-							cellMapElem.listeners[listenerId].notify(notifyData);
-						}
+						elem.listener.notify(notifyData);
 					}
 				}
-				for (var areaIndex in sheetContainer.areaMap) {
-					var areaMapElem = sheetContainer.areaMap[areaIndex];
-					var isIntersect = bbox.isIntersect(areaMapElem.bbox);
+				for(i = 0; i < sheetContainer.rangesTop.length; ++i){
+					elem = sheetContainer.rangesTop[i];
+					var isIntersect = bbox.isIntersect(elem.bbox);
 					if (isIntersect) {
-						for (var listenerId in areaMapElem.listeners) {
-							areaMapElem.listeners[listenerId].notify(notifyData);
-						}
+						elem.listener.notify(notifyData);
 					}
 				}
 			}
@@ -1253,30 +1290,13 @@
 				var changedCell = this.changedCellRepeated;
 				this.changedCellRepeated = null;
 				for (var sheetId in changedCell) {
-					var changedSheet = changedCell[sheetId];
-					var sheetContainer = this.sheetListeners[sheetId];
-					if (sheetContainer) {
-						for (var cellIndex in changedSheet) {
-							if (sheetContainer) {
-								var cellMapElem = sheetContainer.cellMap[cellIndex];
-								if (cellMapElem) {
-									for (var listenerId in cellMapElem.listeners) {
-										cellMapElem.listeners[listenerId].notify(notifyData);
-									}
-								}
-							}
-						}
+					if(changedCell.hasOwnProperty(sheetId)){
+						var sheetContainer = this.getSheetListener(sheetId);
 						if (sheetContainer) {
-							var areas = sheetContainer.areaTree.getByCells(changedSheet);
-							this.tempGetByCells.push({areaTree: sheetContainer.areaTree, areas: areas});
-							for (var i = 0; i < areas.length; ++i) {
-								var area = areas[i];
-								notifyData.areaData = area;
-								for (var listenerId in area.data.listeners) {
-									area.data.listeners[listenerId].notify(notifyData);
-								}
-							}
-							notifyData.areaData = undefined;
+							var cells = changedCell[sheetId];
+							cells.sort();
+							this._broadcastCellsByCells(sheetContainer, cells, notifyData);
+							this._broadcastRangesByCells(sheetContainer, cells, notifyData);
 						}
 					}
 				}
@@ -1287,34 +1307,14 @@
 				var changedRange = this.changedRangeRepeated;
 				this.changedRangeRepeated = null;
 				for (var sheetId in changedRange) {
-					var changedSheet = changedRange[sheetId];
-					var sheetContainer = this.sheetListeners[sheetId];
-					if (sheetContainer) {
+					if(changedRange.hasOwnProperty(sheetId)){
+						var sheetContainer = this.getSheetListener(sheetId);
 						if (sheetContainer) {
-							for (var rangeRef in changedSheet) {
-								var range = changedSheet[rangeRef];
-								for (var cellIndex in sheetContainer.cellMap) {
-								getFromCellIndex(cellIndex);
-									if (range.contains(g_FCI.col, g_FCI.row)) {
-										var cellMapElem = sheetContainer.cellMap[cellIndex];
-										if (cellMapElem) {
-											for (var listenerId in cellMapElem.listeners) {
-												cellMapElem.listeners[listenerId].notify(notifyData);
-									}
-							}
-						}
-								}
-							}
-							var areas = sheetContainer.areaTree.getByRanges(changedSheet);
-							this.tempGetByCells.push({areaTree: sheetContainer.areaTree, areas: areas});
-							for (var i = 0; i < areas.length; ++i) {
-								var area = areas[i];
-								notifyData.areaData = area;
-								for (var listenerId in area.data.listeners) {
-									area.data.listeners[listenerId].notify(notifyData);
-								}
-							}
-							notifyData.areaData = undefined;
+							var ranges = changedRange[sheetId];
+							ranges.rangesTop.sort(Asc.Range.prototype.compareByLeftTop);
+							ranges.rangesBottom.sort(Asc.Range.prototype.compareByRightBottom);
+							this._broadcastCellsByRanges(sheetContainer, ranges.rangesTop, ranges.rangesBottom, notifyData);
+							this._broadcastRangesByRanges(sheetContainer, ranges.rangesTop, ranges.rangesBottom, notifyData);
 						}
 					}
 				}
@@ -1322,8 +1322,39 @@
 		},
 		_broadcastCellsStart: function() {
 			this.isInCalc = true;
-			this.changedCellRepeated = this.changedCell;
-			this.changedRangeRepeated = this.changedRange;
+			var changedSheetRepeated, changedSheet, sheetId;
+			if (this.changedCell) {
+				this.changedCellRepeated = {};
+				for(var sheetId in this.changedCell){
+					if(this.changedCell.hasOwnProperty(sheetId)){
+						changedSheetRepeated = [];
+						this.changedCellRepeated[sheetId] = changedSheetRepeated;
+						changedSheet = this.changedCell[sheetId];
+						for(var cellIndex in changedSheet) {
+							if(changedSheet.hasOwnProperty(cellIndex)){
+								changedSheetRepeated.push(changedSheet[cellIndex]);
+							}
+						}
+					}
+				}
+			}
+			if (this.changedRange) {
+				this.changedRangeRepeated = {};
+				for(sheetId in this.changedRange){
+					if(this.changedRange.hasOwnProperty(sheetId)){
+						changedSheetRepeated = {rangesTop: [], rangesBottom: []};
+						this.changedRangeRepeated[sheetId] = changedSheetRepeated;
+						changedSheet = this.changedRange[sheetId];
+						for(var name in changedSheet) {
+							if(changedSheet.hasOwnProperty(name)){
+								var bbox = changedSheet[name];
+								changedSheetRepeated.rangesTop.push(bbox);
+								changedSheetRepeated.rangesBottom.push(bbox);
+							}
+						}
+					}
+				}
+			}
 			this.changedDefNameRepeated = this.changedDefName;
 		},
 		_broadcastCellsEnd: function() {
@@ -1331,7 +1362,12 @@
 			this.changedDefName = null;
 			for (var i = 0; i < this.tempGetByCells.length; ++i) {
 				var temp = this.tempGetByCells[i];
-				temp.areaTree.getByCellsRangesEnd(temp.areas);
+				temp.isActive = true;
+				if (temp.sharedBroadcast) {
+					temp.sharedBroadcast.changedBBox = null;
+					temp.sharedBroadcast.prevChangedBBox = null;
+					temp.sharedBroadcast.recursion = 0;
+				}
 			}
 			this.tempGetByCells = [];
 		},
@@ -1358,7 +1394,7 @@
 						for (var cellIndex in changedSheet) {
 							if (changedSheet.hasOwnProperty(cellIndex)) {
 								getFromCellIndex(cellIndex);
-								ws._getCell(g_FCI.row, g_FCI.col, callback);
+								ws._getCellNoEmpty(g_FCI.row, g_FCI.col, callback);
 							}
 						}
 					}
@@ -1382,39 +1418,35 @@
 		_shiftMoveDelete: function(notifyType, sheetId, bbox, offset) {
 			var listeners = {};
 			var res = {changed: listeners, shiftedShared: {}};
-			var sheetContainer = this.sheetListeners[sheetId];
+			var sheetContainer = this.getSheetListener(sheetId);
 			if (sheetContainer) {
 				var bboxShift;
 				if (c_oNotifyType.Shift === notifyType) {
 					var bHor = 0 !== offset.col;
 					bboxShift = AscCommonExcel.shiftGetBBox(bbox, bHor);
 				}
-				var isIntersect;
-				for (var cellIndex in sheetContainer.cellMap) {
-					getFromCellIndex(cellIndex);
+				var isIntersect, i, elem;
+				for(i = 0; i < sheetContainer.cells.length; ++i){
+					elem = sheetContainer.cells[i];
+					getFromCellIndex(elem.cellIndex);
 					if (c_oNotifyType.Shift === notifyType) {
 						isIntersect = bboxShift.contains(g_FCI.col, g_FCI.row);
 					} else {
 						isIntersect = bbox.contains(g_FCI.col, g_FCI.row);
 					}
 					if (isIntersect) {
-						var cellMapElem = sheetContainer.cellMap[cellIndex];
-						for (var listenerId in cellMapElem.listeners) {
-							listeners[listenerId] = cellMapElem.listeners[listenerId];
-						}
+						listeners[elem.listener.getListenerId()] = elem.listener;
 					}
 				}
-				for (var areaIndex in sheetContainer.areaMap) {
-					var areaMapElem = sheetContainer.areaMap[areaIndex];
+				for(i = 0; i < sheetContainer.rangesTop.length; ++i){
+					elem = sheetContainer.rangesTop[i];
 					if (c_oNotifyType.Shift === notifyType) {
-						isIntersect = bboxShift.isIntersect(areaMapElem.bbox)
+						isIntersect = bboxShift.isIntersect(elem.bbox)
 					} else if (c_oNotifyType.Move === notifyType || c_oNotifyType.Delete === notifyType) {
-						isIntersect = bbox.isIntersect(areaMapElem.bbox);
+						isIntersect = bbox.isIntersect(elem.bbox);
 					}
 					if (isIntersect) {
-						for (var listenerId in areaMapElem.listeners) {
-							listeners[listenerId] = areaMapElem.listeners[listenerId];
-						}
+						listeners[elem.listener.getListenerId()] = elem.listener;
 					}
 				}
 				var notifyData = {
@@ -1425,259 +1457,354 @@
 				}
 				}
 			return res;
-			}
-	};
-
-	function RangeTree() {
-		this.yTree = new Asc.TreeRB();
-		this.id = 0;
-	}
-
-	RangeTree.prototype = {
-		maxSharedRecursion: 100,
-		add: function(bbox, data) {
-			data.id = this.id++;
-			var startFlag = bbox.r1 !== bbox.r2 ? 1 : 3;
-			//cellsInAreaCount - heuristic for recursion shared(for example A2 shared to AN with '=A1+1')
-			var dataWrap = {bbox: bbox, data: data, cellsInArea: null, cellsInAreaCount: 0};
-			var top = this.yTree.insertOrGet(new Asc.TreeRBNode(bbox.r1, {count: 0, vals: {}}));
-			top.storedValue.vals[data.id] = {startFlag: startFlag, dataWrap: dataWrap};
-			top.storedValue.count++;
-			if (bbox.r1 != bbox.r2) {
-				startFlag = 2;
-				var bottom = this.yTree.insertOrGet(new Asc.TreeRBNode(bbox.r2, {count: 0, vals: {}}));
-				bottom.storedValue.vals[data.id] = {startFlag: startFlag, dataWrap: dataWrap};
-				bottom.storedValue.count++;
+		},
+		_removeFromListeningByLeftTopCell: function(index, arr, bbox, listener) {
+			while(index < arr.length){
+				var elem = arr[index];
+				getFromCellIndex(elem);
+				if(g_FCI.row === bbox.r1 && g_FCI.col === bbox.c1) {
+					if(elem.listener === listener){
+						this.dirtyCellsRemove.push(index);
+						break;
+					}
+				} else {
+					break;
+				}
+				index++;
 			}
 		},
-		remove: function(bbox, data) {
-			var top = this.yTree.getElem(bbox.r1);
-			if (top) {
-				if (top.storedValue.vals[data.id]) {
-					delete top.storedValue.vals[data.id];
-					top.storedValue.count--;
-					if (top.storedValue.count <= 0) {
-						this.yTree.deleteNode(top);
+		_removeFromListeningByLeftTop: function(index, sheetContainer, bbox, listener) {
+			while(index < sheetContainer.length){
+				var elem = sheetContainer[index];
+				if(elem.bbox.r1 === bbox.r1 && elem.bbox.c1 === bbox.c1) {
+					if(elem.listener === listener){
+						sheetContainer.dirtyRangesRemoveTop.push(index);
+						break;
 					}
+				} else {
+					break;
 				}
-				var bottom = this.yTree.getElem(bbox.r2);
-				if (bottom && bottom.storedValue.vals[data.id]) {
-					delete bottom.storedValue.vals[data.id];
-					bottom.storedValue.count--;
-					if (bottom.storedValue.count <= 0) {
-						this.yTree.deleteNode(bottom);
+				index++;
+			}
+		},
+		_removeFromListeningByRightBottom: function(index, sheetContainer, bbox, listener) {
+			while(index < sheetContainer.rangesBottom.length){
+				var elem = sheetContainer.rangesBottom[index];
+				if(elem.bbox.r2 === bbox.r2 && elem.bbox.c2 === bbox.c2) {
+					if(elem.listener === listener){
+						sheetContainer.dirtyRangesRemoveBottom.push(index);
+						break;
+					}
+				} else {
+					break;
+				}
+				index++;
+			}
+		},
+		_broadcastCellsByCells: function(sheetContainer, cellsChanged, notifyData) {
+			var cells = sheetContainer.cells;
+			var indexCell = 0;
+			var indexCellChanged = 0;
+			var row, col, rowChanged, colChanged;
+			if (indexCell < cells.length) {
+				getFromCellIndex(cells[indexCell].cellIndex);
+				row = g_FCI.row;
+				col = g_FCI.col;
+			}
+			if (indexCellChanged < cellsChanged.length) {
+				getFromCellIndex(cellsChanged[indexCellChanged]);
+				rowChanged = g_FCI.row;
+				colChanged = g_FCI.col;
+			}
+			while (indexCell < cells.length && indexCellChanged < cellsChanged.length) {
+				var cmp = Asc.Range.prototype.compareCell(row, col, rowChanged, colChanged);
+				if (cmp > 0) {
+					indexCellChanged++;
+					if (indexCellChanged < cellsChanged.length) {
+						getFromCellIndex(cellsChanged[indexCellChanged]);
+						rowChanged = g_FCI.row;
+						colChanged = g_FCI.col;
+					}
+				} else {
+					if (0 === cmp) {
+						cells[indexCell].listener.notify(notifyData);
+					}
+					indexCell++;
+					if (indexCell < cells.length) {
+						getFromCellIndex(cells[indexCell].cellIndex);
+						row = g_FCI.row;
+						col = g_FCI.col;
 					}
 				}
 			}
 		},
-		getByCells: function(cells) {
-			var res = [];
-			var nodes = this.yTree.getNodeAll();
-			var cellArr = [];
-			for (var cellIndex in cells) {
-				cellArr.push(cellIndex - 0);
+		_broadcastRangesByCells: function(sheetContainer, cells, notifyData) {
+			if(0 === sheetContainer.rangesTop.length || 0 === cells.length){
+				return;
 			}
-			//sort завязана на реализацию getCellIndex
-			cellArr.sort(function(a, b) {
-				return a - b;
-			});
-			if (cellArr.length > 0 && nodes.length > 0) {
-				var curNodes = {};
-				var curY = null;
-				var curNodeY = null;
-				var curNodeYIndex = 0;
-				var curCellIndex = 0;
-				var curCellX = null;
-				var curCellY = null;
-				while (curNodeYIndex < nodes.length && curCellIndex < cellArr.length) {
-					if (!curNodeY) {
-						curNodeY = nodes[curNodeYIndex];
-						curY = curNodeY.key;
-						for (var id in curNodeY.storedValue.vals) {
-							var elem = curNodeY.storedValue.vals[id];
-							if (0 !== (1 & elem.startFlag) &&
-								!(elem.dataWrap.cellsInArea && elem.dataWrap.cellsInArea.isEqual(elem.dataWrap.bbox))) {
-								for (var i = elem.dataWrap.bbox.c1; i <= elem.dataWrap.bbox.c2; ++i) {
-									var curNodesElem = curNodes[i];
-									if (!curNodesElem) {
-										curNodesElem = {};
-										curNodes[i] = curNodesElem;
+			var rangesTop = sheetContainer.rangesTop;
+			var rangesBottom = sheetContainer.rangesBottom;
+			var indexTop = 0;
+			var indexBottom = 0;
+			var indexCell = 0;
+			var curRow = {};
+			var affected = [];
+			var i, curY, elem, listenerId, curRowElem;
+			if (indexCell < cells.length) {
+				getFromCellIndex(cells[indexCell]);
+			}
+			//scanline by Y
+			while (indexBottom < rangesBottom.length && indexCell < cells.length) {
+				//next curY
+				if(indexTop < rangesTop.length){
+					curY = Math.min(rangesTop[indexTop].bbox.r1, rangesBottom[indexBottom].bbox.r2);
+				} else {
+					curY = rangesBottom[indexBottom].bbox.r2;
+				}
+				//process cells before curY
+				while (indexCell < cells.length && g_FCI.row < curY) {
+					this._broadcastRangesByCellsCell(curRow, g_FCI.row, g_FCI.col, affected);
+					getFromCellIndex(cells[indexCell++]);
+				}
+				while (indexTop < rangesTop.length && curY === rangesTop[indexTop].bbox.r1) {
+					elem = rangesTop[indexTop];
+					if (elem.isActive) {
+						listenerId = elem.listener.getListenerId();
+						curRow[listenerId] = elem;
+					}
+					indexTop++;
+				}
+				while (indexCell < cells.length && g_FCI.row <= curY) {
+					this._broadcastRangesByCellsCell(curRow, g_FCI.row, g_FCI.col, affected);
+					getFromCellIndex(cells[indexCell++]);
+				}
+				while (indexBottom < rangesBottom.length && curY === rangesBottom[indexBottom].bbox.r2) {
+					elem = rangesBottom[indexBottom];
+					if (elem.isActive) {
+						curRow[elem.listener.getListenerId()] = null;
+					}
+					indexBottom++;
+				}
+			}
+			this._broadcastNotifyRanges(affected, notifyData);
+		},
+		_broadcastRangesByCellsCell: function(curRow, row, col, output) {
+				for (var listenerId in curRow) {
+					if (curRow.hasOwnProperty(listenerId)) {
+						var elem = curRow[listenerId];
+						if (elem && elem.bbox.c1 <= col && row <= elem.bbox.r1) {
+							var sharedBroadcast = elem.sharedBroadcast;
+							if (!sharedBroadcast) {
+								output.push(elem);
+								elem.isActive = false;
+								this._broadcastRangesByCellsRemoveFromCurNodes(curRow, elem);
+							} else if (!(sharedBroadcast.changedBBox && sharedBroadcast.changedBBox.contains(col, row))) {
+								if (sharedBroadcast.changedBBox === sharedBroadcast.prevChangedBBox) {
+									sharedBroadcast.recursion++;
+									if (sharedBroadcast.recursion >= this.maxSharedRecursion) {
+										sharedBroadcast.changedBBox = elem.bbox;
 									}
-									curNodesElem[id] = elem;
+									output.push(elem);
 								}
-							}
-						}
-					}
-					if (!curCellX) {
-						var cellIndex = cellArr[curCellIndex];
-						getFromCellIndex(cellIndex);
-						curCellX = g_FCI.col;
-						curCellY = g_FCI.row;
-					}
-					if (curCellY <= curY) {
-						var curNodesElemX = curNodes[curCellX];
-						for (var id in curNodesElemX) {
-							var elem = curNodesElemX[id];
-							if (elem.dataWrap.bbox.r1 <= curCellY && !(elem.dataWrap.cellsInArea &&
-								elem.dataWrap.cellsInArea.contains(curCellX, curCellY))) {
-								if (elem.dataWrap.cellsInArea) {
-									elem.dataWrap.cellsInArea.union3(curCellX, curCellY);
+								if (sharedBroadcast.changedBBox) {
+									sharedBroadcast.changedBBox.union3(col, row);
 								} else {
-									elem.dataWrap.cellsInArea = new Asc.Range(curCellX, curCellY, curCellX, curCellY);
+									sharedBroadcast.changedBBox = new Asc.Range(col, row, col, row);
 								}
-								res.push(elem.dataWrap);
-								if (elem.dataWrap.cellsInArea.isEqual(elem.dataWrap.bbox)) {
-								for (var i = elem.dataWrap.bbox.c1; i <= elem.dataWrap.bbox.c2; ++i) {
-									var curNodesElem = curNodes[i];
-									if (curNodesElem) {
-										delete curNodesElem[id];
-									}
+								if (sharedBroadcast.changedBBox.isEqual(elem.bbox)) {
+									elem.isActive = false;
+									this._broadcastRangesByCellsRemoveFromCurNodes(curRow, elem);
 								}
 							}
 						}
-						}
-						curCellIndex++;
-						curCellX = null;
-						curCellY = null;
-					} else {
-						for (var id in curNodeY.storedValue.vals) {
-							var elem = curNodeY.storedValue.vals[id];
-							if (0 !== (2 & elem.startFlag) &&
-								!(elem.dataWrap.cellsInArea && elem.dataWrap.cellsInArea.isEqual(elem.dataWrap.bbox))) {
-								for (var i = elem.dataWrap.bbox.c1; i <= elem.dataWrap.bbox.c2; ++i) {
-									var curNodesElem = curNodes[i];
-									if (curNodesElem) {
-										delete curNodesElem[id];
-									}
-								}
-							}
-						}
-						curNodeYIndex++;
-						curNodeY = null;
+
 					}
+				}
+		},
+		_broadcastRangesByCellsRemoveFromCurNodes: function(curRow, elem) {
+			var listenerId = elem.listener.getListenerId();
+			for (var i = elem.bbox.c1; i <= elem.bbox.c2; ++i) {
+				var curRowElem = curRow[i];
+				if (curRowElem) {
+					curRowElem[listenerId] = undefined;
 				}
 			}
-			return res;
 		},
-		getByRanges: function(changedSheet) {
-			var res = [];
-			var node, id, bbox, intersect;
-			var nodes = this.yTree.getNodeAll();
-			if (nodes.length > 0) {
-				var starts = [];
-				var ends = [];
-				for (var rangeRef in changedSheet) {
-					if (changedSheet.hasOwnProperty(rangeRef)) {
-						bbox = changedSheet[rangeRef];
-						starts.push(bbox);
-						ends.push(bbox);
-					}
+		_broadcastCellsByRanges: function(sheetContainer, rangesTop, rangesBottom, notifyData) {
+			if(0 === sheetContainer.cells.length || 0 === rangesTop.length){
+				return;
+			}
+			var cells = sheetContainer.cells;
+			var indexTop = 0;
+			var indexBottom = 0;
+			var indexCell = 0;
+			var curRow = {};
+			var i, curY, bbox;
+			if (indexCell < cells.length) {
+				getFromCellIndex(cells[indexCell].cellIndex);
+			}
+			//scanline by Y
+			while (indexBottom < rangesBottom.length && indexCell < cells.length) {
+				//next curY
+				if(indexTop < rangesTop.length){
+					curY = Math.min(rangesTop[indexTop].r1, rangesBottom[indexBottom].r2);
+				} else {
+					curY = rangesBottom[indexBottom].r2;
 				}
-				if (starts.length > 0 && ends.length > 0) {
-					starts.sort(function(a, b) {
-						return a.r1 - b.r1;
-					});
-					ends.sort(function(a, b) {
-						return a.r2 - b.r2;
-					});
-					var curNodes = {};
-					var curBBoxes = {};
-					var startIndex = 0;
-					var endIndex = 0;
-					var nodeIndex = 0;
-					var startVal = starts[startIndex++];
-					var endVal = ends[endIndex++];
-					var nodeVal = nodes[nodeIndex++];
-					while (true) {
-						var type = 2;
-						if (startVal.r1 <= nodeVal.key) {
-							if (startVal.r1 <= endVal.r2) {
-								type = 1;
-							}
-						} else if (nodeVal.key <= endVal.r2) {
-							type = 0;
-						}
-						if (1 === type) {
-							for (id in curNodes) {
-								if (curNodes.hasOwnProperty(id)) {
-									node = curNodes[id];
-									intersect = node.dataWrap.bbox.intersectionSimple(startVal);
-									if (intersect &&
-										!(node.dataWrap.cellsInArea && node.dataWrap.cellsInArea.isEqual(intersect))) {
-										if (node.dataWrap.cellsInArea) {
-											if (node.dataWrap.cellsInAreaCount < this.maxSharedRecursion) {
-												node.dataWrap.cellsInArea.union2(intersect);
-												node.dataWrap.cellsInAreaCount++;
-											} else {
-												node.dataWrap.cellsInArea = node.dataWrap.bbox;
-											}
-										} else {
-											node.dataWrap.cellsInArea = intersect;
-										}
-										res.push(node.dataWrap);
-									}
-								}
-							}
-							curBBoxes[startVal.getName()] = startVal;
-							if (startIndex < starts.length) {
-								startVal = starts[startIndex++];
-							} else {
-								startVal = {r1: Number.MAX_VALUE};
-							}
-						} else if (2 === type) {
-							delete curBBoxes[endVal.getName()];
-							if (endIndex < ends.length) {
-								endVal = ends[endIndex++];
-							} else {
-								break;
-							}
+				//process cells before curY
+				while (indexCell < cells.length && g_FCI.row < curY) {
+					if (curRow[g_FCI.col]) {
+						cells[indexCell].listener.notify(notifyData);
+					}
+					getFromCellIndex(cells[indexCell++].cellIndex);
+				}
+				while (indexTop < rangesTop.length && curY === rangesTop[indexTop].r1) {
+					bbox = rangesTop[indexTop];
+					for (i = bbox.c1; i <= bbox.c2; ++i) {
+						if (undefined === curRow[i]) {
+							curRow[i] = 1;
 						} else {
-							for (id in nodeVal.storedValue.vals) {
-								if (nodeVal.storedValue.vals.hasOwnProperty(id)) {
-									node = nodeVal.storedValue.vals[id];
-									if (0 !== (1 & node.startFlag)) {
-										for (var name in curBBoxes) {
-											if (curBBoxes.hasOwnProperty(name)) {
-												bbox = curBBoxes[name];
-												intersect = node.dataWrap.bbox.intersectionSimple(bbox);
-												if (intersect && !(node.dataWrap.cellsInArea &&
-													node.dataWrap.cellsInArea.isEqual(intersect))) {
-													if (node.dataWrap.cellsInArea) {
-														if (node.dataWrap.cellsInAreaCount < this.maxSharedRecursion) {
-															node.dataWrap.cellsInArea.union2(intersect);
-															node.dataWrap.cellsInAreaCount++;
-														} else {
-															node.dataWrap.cellsInArea = node.dataWrap.bbox;
-														}
-													} else {
-														node.dataWrap.cellsInArea = intersect;
-													}
-													res.push(node.dataWrap);
-												}
-											}
-										}
-										curNodes[node.dataWrap.data.id] = node;
-									} else if (0 !== (2 & node.startFlag)) {
-										delete curNodes[node.dataWrap.data.id];
-									}
-								}
-							}
-							if (nodeIndex < nodes.length) {
-								nodeVal = nodes[nodeIndex++];
-							} else {
-								break;
+							curRow[i]++;
+						}
+					}
+					indexTop++;
+				}
+				while (indexCell < cells.length && g_FCI.row <= curY) {
+					if (curRow[g_FCI.col]) {
+						cells[indexCell].listener.notify(notifyData);
+					}
+					getFromCellIndex(cells[indexCell++].cellIndex);
+				}
+				while (indexBottom < rangesBottom.length && curY === rangesBottom[indexBottom].r2) {
+					bbox = rangesBottom[indexBottom];
+					for (i = bbox.c1; i <= bbox.c2; ++i) {
+						curRow[i]--;
+					}
+					indexBottom++;
+				}
+			}
+		},
+		_broadcastRangesByRanges: function(sheetContainer, rangesTopChanged, rangesBottomChanged, notifyData) {
+			if(0 === sheetContainer.rangesTop.length || 0 === rangesTopChanged.length){
+				return;
+			}
+			var rangesTop = sheetContainer.rangesTop;
+			var rangesBottom = sheetContainer.rangesBottom;
+			var indexTop = 0;
+			var indexBottom = 0;
+			var indexTopChanged = 0;
+			var indexBottomChanged = 0;
+			var curRow = {};
+			var curRowChanged = {};
+			var affected = [];
+			var i, curY, elem, bbox, id;
+			//scanline by Y
+			while (indexBottom < rangesBottom.length && indexBottomChanged < rangesBottomChanged.length) {
+				//next curY
+				if(indexTop < rangesTop.length){
+					curY = Math.min(curY, rangesTop[indexTop].bbox.r1);
+				}
+				if(indexTopChanged < rangesTopChanged.length){
+					curY = Math.min(curY, rangesTopChanged[indexTopChanged].r1);
+				}
+				curY = Math.min(rangesBottomChanged[indexBottomChanged].r2, rangesBottom[indexBottom].bbox.r2);
+
+				while (indexTopChanged < rangesTopChanged.length && curY === rangesTopChanged[indexTopChanged].r1) {
+					bbox = rangesTopChanged[indexTopChanged];
+					curRowChanged[bbox.getName()] = bbox;
+					for (id in curRow) {
+						if (curRow.hasOwnProperty(id)) {
+							elem = curRow[id];
+							if(elem){
+								this._broadcastRangesByRangesIntersect(elem, bbox, curRow, affected);
 							}
 						}
 					}
+					indexTopChanged++;
+				}
+				while (indexTop < rangesTop.length && curY === rangesTop[indexTop].bbox.r1) {
+					elem = rangesTop[indexTop];
+					if (elem.isActive) {
+						curRow[elem.listener.getListenerId()] = elem;
+						for (id in curRowChanged) {
+							if (curRowChanged.hasOwnProperty(id)) {
+								bbox = curRowChanged[id];
+								if(bbox) {
+									this._broadcastRangesByRangesIntersect(elem, bbox, curRow, affected);
+								}
+							}
+						}
+					}
+					indexTop++;
+				}
+
+				while (indexBottomChanged < rangesBottomChanged.length && curY === rangesBottomChanged[indexBottomChanged].r2) {
+					bbox = rangesBottomChanged[indexBottomChanged];
+					curRowChanged[bbox.getName()] = undefined;
+					indexBottomChanged++;
+				}
+				while (indexBottom < rangesBottom.length && curY === rangesBottom[indexBottom].bbox.r2) {
+					elem = rangesBottom[indexBottom];
+					if (elem.isActive) {
+						curRow[elem.listener.getListenerId()] = undefined;
+					}
+					indexBottom++;
 				}
 			}
-			return res;
+			this._broadcastNotifyRanges(affected, notifyData);
 		},
-		getByCellsRangesEnd: function(areas) {
-			for (var i = 0; i < areas.length; ++i) {
-				var area = areas[i];
-				area.cellsInArea = null;
-				area.cellsInAreaCount = 0;
+		_broadcastNotifyRanges: function(affected, notifyData) {
+			var areaData = {bbox: null, changedBBox: null};
+			for(var i = 0; i < affected.length; ++i){
+				var elem = affected[i];
+				var shared = elem.sharedBroadcast;
+				if (shared) {
+					areaData.bbox = elem.bbox;
+					notifyData.areaData = areaData;
+					if(!shared.prevChangedBBox){
+						areaData.changedBBox = shared.changedBBox;
+						elem.listener.notify(notifyData);
+					} else {
+						var ranges = shared.changedBBox.difference(shared.prevChangedBBox);
+						for(var j = 0; j < ranges.length; ++j){
+							areaData.changedBBox = ranges[i];
+							elem.listener.notify(notifyData);
+						}
+					}
+					notifyData.areaData = undefined;
+					elem.sharedBroadcast.prevChangedBBox = elem.sharedBroadcast.changedBBox;
+				} else {
+					elem.listener.notify(notifyData);
+				}
+			}
+			this.tempGetByCells.push(affected);
+		},
+		_broadcastRangesByRangesIntersect: function(elem, bbox, curRow, output) {
+			var intersect = elem.bbox.intersectionSimple(bbox);
+			if (intersect) {
+				var sharedBroadcast = elem.sharedBroadcast;
+				if (!sharedBroadcast) {
+					output.push(elem);
+					elem.isActive = false;
+					curRow[elem.listener.getListenerId()] = undefined;
+				} else if (!(sharedBroadcast.changedBBox && sharedBroadcast.changedBBox.containsRange(intersect))) {
+					if (sharedBroadcast.changedBBox === sharedBroadcast.prevChangedBBox) {
+						sharedBroadcast.recursion++;
+						if (sharedBroadcast.recursion >= this.maxSharedRecursion) {
+							sharedBroadcast.changedBBox = elem.bbox;
+						}
+						output.push(elem);
+					}
+					if (sharedBroadcast.changedBBox) {
+						sharedBroadcast.changedBBox.union2(intersect);
+					} else {
+						sharedBroadcast.changedBBox = intersect;
+					}
+					if (sharedBroadcast.changedBBox.isEqual(elem.bbox)) {
+						elem.isActive = false;
+						curRow[elem.listener.getListenerId()] = undefined;
+					}
+				}
 			}
 		}
 	};
@@ -7951,7 +8078,7 @@
 		if (shared) {
 			if (areaData) {
 				var bbox = areaData.bbox;
-				var changedRange = bbox.getSharedIntersect(shared.ref, areaData.cellsInArea);
+				var changedRange = bbox.getSharedIntersect(shared.ref, areaData.changedBBox);
 				dependencyFormulas.addToChangedRange2(this.ws.getId(), changedRange);
 			} else {
 				dependencyFormulas.addToChangedRange2(this.ws.getId(), shared.ref);
@@ -11886,7 +12013,6 @@
 	window['AscCommonExcel'].Cell = Cell;
 	window['AscCommonExcel'].Range = Range;
 	window['AscCommonExcel'].DefName = DefName;
-	window['AscCommonExcel'].RangeTree = RangeTree;
 	window['AscCommonExcel'].DependencyGraph = DependencyGraph;
 	window['AscCommonExcel'].HiddenManager = HiddenManager;
 	window['AscCommonExcel'].CCellWithFormula = CCellWithFormula;

@@ -144,6 +144,21 @@
 	var sSaveFileLocalUrl = "../../../../savefile";
 	var nMaxRequestLength = 5242880;//5mb <requestLimits maxAllowedContentLength="30000000" /> default 30mb
 
+	function lower_bound(arr, val, cmp) {
+		var left = 0;
+		var right = arr.length;
+		var mid;
+		while (left < right) {
+			mid = left + ((right - left) >>> 1);
+			if (cmp(arr[mid], val) >= 0) {
+				right = mid;
+			} else {
+				left = mid + 1;
+			}
+		}
+		return left;
+	}
+
 	function getSockJs()
 	{
 		return window['SockJS'] || require('sockjs');
@@ -4093,6 +4108,7 @@
 
 	//------------------------------------------------------------export---------------------------------------------------
 	window['AscCommon'] = window['AscCommon'] || {};
+	window["AscCommon"].lower_bound = lower_bound;
 	window["AscCommon"].getSockJs = getSockJs;
 	window["AscCommon"].getJSZipUtils = getJSZipUtils;
 	window["AscCommon"].getJSZip = getJSZip;
